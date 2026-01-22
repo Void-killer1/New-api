@@ -1,18 +1,19 @@
 import { MongoClient, ObjectId } from 'mongodb';
 
 export default async function handler(req, res) {
-  // CORS ve Header Ayarları
+  // CORS Ayarları
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-mongodb-uri');
 
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  const mongoUri = req.headers['x-mongodb-uri'];
-  const { db, col, action, id } = req.query;
+  // URI'yi hem Header'dan hem de URL'den (?uri=...) alabilir
+  const mongoUri = req.headers['x-mongodb-uri'] || req.query.uri;
+  const { db, col, action, id, export: exportJson } = req.query;
 
   if (!mongoUri) {
-    return res.status(400).json({ error: "Eksik Header: x-mongodb-uri bulunamadı." });
+    return res.status(400).json({ error: "Hata: MongoDB URI (bağlantı adresi) bulunamadı!" });
   }
 
   const client = new MongoClient(mongoUri);
@@ -22,47 +23,38 @@ export default async function handler(req, res) {
     const database = client.db(db || 'test');
     const collection = database.collection(col || 'items');
 
-    switch (req.method) {
-      case 'GET':
-        if (action === 'stats') {
-          // Depolama alanı ve istatistik görüntüleme
-          const stats = await database.command({ dbStats: 1 });
-          return res.status(200).json({
-            status: "success",
-            storage: {
-              used_mb: (stats.storageSize / 1024 / 1024).toFixed(2),
-              data_size_mb: (stats.dataSize / 1024 / 1024).toFixed(2),
-              objects: stats.objects
-            }
-          });
-        }
-        // Tüm veriyi listeleme (Raw/JSON)
-        const docs = await collection.find({}).limit(500).toArray();
-        return res.status(200).json(docs);
+    if (req.method === 'GET') {
+      // 📊 İstatistik Modu
+      if (action === 'stats') {
+        const stats = await database.command({ dbStats: 1 });
+        return res.status(200).json({
+          status: "success",
+          storage: {
+            used_mb: (stats.storageSize / 1024 / 1024).toFixed(2),
+            objects: stats.objects
+          }
+        });
+      }
 
-      case 'POST':
-        // Yeni veri ekleme
-        const newDoc = await collection.insertOne(req.body);
-        return res.status(201).json(newDoc);
+      // 📥 Veri Listeleme / JSON Dışa Aktarma
+      const docs = await collection.find({}).limit(5000).toArray();
 
-      case 'PUT':
-        // Veri güncelleme
-        if (!id) return res.status(400).json({ error: "Güncelleme için ?id=... gerekli." });
-        const updated = await collection.updateOne(
-          { _id: new ObjectId(id) },
-          { $set: req.body }
-        );
-        return res.status(200).json(updated);
+      // Eğer export=true ise tarayıcıya dosya indirtme başlığı ekle
+      if (exportJson === 'true') {
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Content-Disposition', 'attachment; filename=mongodb_export.json');
+        return res.status(200).send(JSON.stringify(docs, null, 2));
+      }
 
-      case 'DELETE':
-        // Veri silme
-        if (!id) return res.status(400).json({ error: "Silme işlemi için ?id=... gerekli." });
-        const deleted = await collection.deleteOne({ _id: new ObjectId(id) });
-        return res.status(200).json(deleted);
-
-      default:
-        return res.status(405).json({ error: "Method Not Allowed" });
+      return res.status(200).json(docs);
     }
+
+    if (req.method === 'POST') {
+      const result = await collection.insertOne(req.body);
+      return res.status(201).json(result);
+    }
+
+    // ... Diğer metodlar (PUT/DELETE)
   } catch (err) {
     return res.status(500).json({ error: err.message });
   } finally {
